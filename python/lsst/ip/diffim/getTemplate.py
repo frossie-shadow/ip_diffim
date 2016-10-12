@@ -74,6 +74,9 @@ class GetCoaddAsTemplateTask(pipeBase.Task):
         self.log.info("Using skyMap tract %s" % (tractInfo.getId(),))
         skyCorners = [expWcs.pixelToSky(pixPos) for pixPos in expBoxD.getCorners()]
         patchList = tractInfo.findPatchList(skyCorners)
+        expFilterName = sensorRef.getButler().queryMetadata("calexp",
+                                                        format="filter",
+                                                        dataId=sensorRef.dataId)[0]
 
         if not patchList:
             raise RuntimeError("No suitable tract found")
@@ -92,7 +95,8 @@ class GetCoaddAsTemplateTask(pipeBase.Task):
         coaddExposure = afwImage.ExposureF(coaddBBox, coaddWcs)
         coaddExposure.getMaskedImage().set(numpy.nan, afwImage.MaskU.getPlaneBitMask("NO_DATA"), numpy.nan)
         nPatchesFound = 0
-        coaddFilter = None
+
+        coaddFilterName = expFilterName
         coaddPsf = None
         for patchInfo in patchList:
             patchSubBBox = patchInfo.getOuterBBox()
@@ -101,6 +105,7 @@ class GetCoaddAsTemplateTask(pipeBase.Task):
                 datasetType=self.config.coaddName + "Coadd_sub",
                 bbox=patchSubBBox,
                 tract=tractInfo.getId(),
+                filter=coaddFilterName,
                 patch="%s,%s" % (patchInfo.getIndex()[0], patchInfo.getIndex()[1]),
             )
             if patchSubBBox.isEmpty():
@@ -115,8 +120,6 @@ class GetCoaddAsTemplateTask(pipeBase.Task):
             self.log.info("Reading patch %s" % patchArgDict)
             coaddPatch = sensorRef.get(**patchArgDict)
             coaddExposure.getMaskedImage().assign(coaddPatch.getMaskedImage(), coaddPatch.getBBox())
-            if coaddFilter is None:
-                coaddFilter = coaddPatch.getFilter()
 
             # Retrieve the PSF for this coadd tract, if not already retrieved
             if coaddPsf is None and coaddPatch.hasPsf():
@@ -129,7 +132,7 @@ class GetCoaddAsTemplateTask(pipeBase.Task):
             raise RuntimeError("No coadd Psf found!")
 
         coaddExposure.setPsf(coaddPsf)
-        coaddExposure.setFilter(coaddFilter)
+        coaddExposure.setFilter(exposure.getFilter())
         return pipeBase.Struct(exposure=coaddExposure,
                                sources=None)
 
