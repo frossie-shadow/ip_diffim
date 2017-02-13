@@ -102,7 +102,7 @@ class GetCoaddAsTemplateTask(pipeBase.Task):
             patchSubBBox = patchInfo.getOuterBBox()
             patchSubBBox.clip(coaddBBox)
             patchArgDict = dict(
-                datasetType=self.config.coaddName + "Coadd_sub",
+                datasetType=self.config.coaddName + "Coadd_calexp_sub",
                 bbox=patchSubBBox,
                 tract=tractInfo.getId(),
                 filter=coaddFilterName,
