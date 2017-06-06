@@ -28,7 +28,8 @@ import lsst.afw.image as afwImage
 import lsst.afw.math as afwMath
 from testImageDecorrelation import makeFakeImages
 
-from lsst.ip.diffim.zogy import ZogyTask, ZogyConfig, ZogyMapReduceConfig
+from lsst.ip.diffim.zogy import ZogyTask, ZogyConfig, ZogyMapReduceConfig, \
+    ZogyImagePsfMatchConfig, ZogyImagePsfMatchTask
 from lsst.ip.diffim.imageMapReduce import ImageMapReduceTask
 
 try:
@@ -65,7 +66,7 @@ class ZogyTest(lsst.utils.tests.TestCase):
 
         seed = 666
         self.im1ex, self.im2ex \
-            = makeFakeImages(svar=self.svar, tvar=self.tvar,
+            = makeFakeImages(size=(255, 257), svar=self.svar, tvar=self.tvar,
                              psf1=self.psf1_sigma, psf2=self.psf2_sigma,
                              n_sources=10, psf_yvary_factor=varyPsf,
                              seed=seed, verbose=False)
@@ -137,7 +138,7 @@ class ZogyTest(lsst.utils.tests.TestCase):
         task = ZogyTask(templateExposure=self.im2ex, scienceExposure=self.im1ex, config=config)
         D_F = task.computeDiffim(inImageSpace=False)
         D_R = task.computeDiffim(inImageSpace=True)
-        self._compareExposures(D_F, D_R)
+        self._compareExposures(D_F.D, D_R.D)
 
     def _testZogyScorr(self, varAst=0.):
         """Compute Zogy likelihood images (Scorr) using Fourier- and Real-space methods.
@@ -148,7 +149,7 @@ class ZogyTest(lsst.utils.tests.TestCase):
         task = ZogyTask(templateExposure=self.im2ex, scienceExposure=self.im1ex, config=config)
         D_F = task.computeScorr(inImageSpace=False, xVarAst=varAst, yVarAst=varAst)
         D_R = task.computeScorr(inImageSpace=True, xVarAst=varAst, yVarAst=varAst)
-        self._compareExposures(D_F, D_R, Scorr=True)
+        self._compareExposures(D_F.S, D_R.S, Scorr=True)
 
     def testZogyScorr(self):
         """Compute Zogy likelihood images (Scorr) using Fourier- and Real-space methods.
@@ -181,9 +182,9 @@ class ZogyTest(lsst.utils.tests.TestCase):
         config = ZogyConfig()
         task = ZogyTask(templateExposure=self.im2ex, scienceExposure=self.im1ex, config=config)
         if not doScorr:
-            D = task.computeDiffim(inImageSpace=inImageSpace, **kwargs)
+            D = task.computeDiffim(inImageSpace=inImageSpace, **kwargs).D
         else:
-            D = task.computeScorr(inImageSpace=inImageSpace, **kwargs)
+            D = task.computeScorr(inImageSpace=inImageSpace, **kwargs).S
 
         self._compareExposures(D_mapReduced, D, tol=0.04, Scorr=doScorr)
 
@@ -202,6 +203,34 @@ class ZogyTest(lsst.utils.tests.TestCase):
         self._testZogyDiffimMapReduced(inImageSpace=True, doScorr=True)
         self._testZogyDiffimMapReduced(inImageSpace=False, doScorr=True, xVarAst=0.1, yVarAst=0.1)
         self._testZogyDiffimMapReduced(inImageSpace=True, doScorr=True, xVarAst=0.1, yVarAst=0.1)
+
+    def _testZogyImagePsfMatchTask(self, spatiallyVarying=False, inImageSpace=False,
+                                   doScorr=False, **kwargs):
+        """Test running Zogy using ZogyImagePsfMatchTask framework.
+
+        Compare resulting diffim version with original, non-spatially-varying version.
+        """
+        config = ZogyImagePsfMatchConfig()
+        task = ZogyImagePsfMatchTask(config=config)
+        result = task.subtractExposures(self.im2ex, self.im1ex, inImageSpace=inImageSpace,
+                                        doWarping=False, spatiallyVarying=spatiallyVarying)
+        D_fromTask = result.subtractedExposure
+
+        config = ZogyConfig()
+        task = ZogyTask(templateExposure=self.im2ex, scienceExposure=self.im1ex, config=config)
+        D = task.computeDiffim(inImageSpace=inImageSpace, **kwargs).D
+        self._compareExposures(D_fromTask, D, tol=0.04, Scorr=doScorr)
+
+    def testZogyImagePsfMatchTask(self):
+        """Test running Zogy using ImageMapReduceTask framework.
+
+        This is just a test that it runs without failure.
+        """
+        self._setUpImages()
+        self._testZogyDiffimMapReduced(inImageSpace=False)
+        self._testZogyDiffimMapReduced(inImageSpace=True)
+        self._testZogyDiffimMapReduced(inImageSpace=False, spatiallyVarying=True)
+        self._testZogyDiffimMapReduced(inImageSpace=True, spatiallyVarying=True)
 
 
 class MemoryTester(lsst.utils.tests.MemoryTestCase):
