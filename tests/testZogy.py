@@ -222,15 +222,61 @@ class ZogyTest(lsst.utils.tests.TestCase):
         self._compareExposures(D_fromTask, D, tol=0.04, Scorr=doScorr)
 
     def testZogyImagePsfMatchTask(self):
-        """Test running Zogy using ImageMapReduceTask framework.
-
-        This is just a test that it runs without failure.
+        """Test running ZogyTask both with and without the spatiallyVarying option.
         """
         self._setUpImages()
-        self._testZogyDiffimMapReduced(inImageSpace=False)
-        self._testZogyDiffimMapReduced(inImageSpace=True)
-        self._testZogyDiffimMapReduced(inImageSpace=False, spatiallyVarying=True)
-        self._testZogyDiffimMapReduced(inImageSpace=True, spatiallyVarying=True)
+        self._testZogyImagePsfMatchTask(inImageSpace=False)
+        self._testZogyImagePsfMatchTask(inImageSpace=True)
+        self._testZogyImagePsfMatchTask(inImageSpace=False, spatiallyVarying=True)
+        self._testZogyImagePsfMatchTask(inImageSpace=True, spatiallyVarying=True)
+
+    def testZogyImagePsfMatchTaskDifferentPsfSizes(self):
+        """Test running ZogyTask both with and without the spatiallyVarying option.
+
+        Here we artificially set the two images to have PSFs with different dimensions
+        to ensure this edge case passes. This also tests cases where one of the PSFs
+        is not square.
+        """
+        import lsst.afw.geom as afwGeom
+        import lsst.meas.algorithms as measAlg
+
+        # All this to grow the PSF of im1ex by a few pixels:
+        def _growPsf(exp, extraPix=(2, 3)):
+            bbox = exp.getBBox()
+            center = ((bbox.getBeginX() + bbox.getEndX()) // 2., (bbox.getBeginY() + bbox.getEndY()) // 2.)
+            center = afwGeom.Point2D(center[0], center[1])
+            kern = exp.getPsf().computeKernelImage(center).convertF()
+            kernSize = kern.getDimensions()
+            paddedKern = afwImage.ImageF(kernSize[0] + extraPix[0], kernSize[1] + extraPix[1])
+            bboxToPlace = afwGeom.Box2I(afwGeom.Point2I((kernSize[0] + extraPix[0] - kern.getWidth()) // 2,
+                                                        (kernSize[1] + extraPix[1] - kern.getHeight()) // 2),
+                                        kern.getDimensions())
+            paddedKern.assign(kern, bboxToPlace)
+            fixedKern = afwMath.FixedKernel(paddedKern.convertD())
+            psfNew = measAlg.KernelPsf(fixedKern, center)
+            exp.setPsf(psfNew)
+            return exp
+
+        def _runAllTests():
+            self._testZogyImagePsfMatchTask(inImageSpace=False)
+            self._testZogyImagePsfMatchTask(inImageSpace=True)
+            self._testZogyImagePsfMatchTask(inImageSpace=False, spatiallyVarying=True)
+            self._testZogyImagePsfMatchTask(inImageSpace=True, spatiallyVarying=True)
+
+        # Try a range of PSF size combinations...
+        self._setUpImages()
+        self.im1ex = _growPsf(self.im1ex, (2, 3))
+        _runAllTests()
+
+        self.im2ex = _growPsf(self.im2ex, (3, 2))
+        _runAllTests()
+
+        self._setUpImages()
+        self.im2ex = _growPsf(self.im2ex, (0, 1))
+        _runAllTests()
+
+        self.im2ex = _growPsf(self.im2ex, (3, 1))
+        _runAllTests()
 
 
 class MemoryTester(lsst.utils.tests.MemoryTestCase):

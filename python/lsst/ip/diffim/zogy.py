@@ -229,11 +229,21 @@ class ZogyTask(pipeBase.Task):
         self.im1_psf = selectPsf(psf1, self.template)
         self.im2_psf = selectPsf(psf2, self.science)
 
-        # Make sure PSFs are the same size.
-        if len(self.im1_psf.shape) < len(self.im2_psf.shape):
-            self.im1_psf = ZogyTask._padPsfToSize(self.im1_psf, self.im2_psf.shape)
-        elif len(self.im2_psf) < len(self.im1_psf):
-            self.im2_psf = ZogyTask._padPsfToSize(self.im2_psf, self.im1_psf.shape)
+        # Make sure PSFs are the same size. Messy, but should work for all cases.
+        pShape1 = self.im1_psf.shape
+        pShape2 = self.im2_psf.shape
+        if (pShape1[0] < pShape2[0]):
+            self.im1_psf = np.pad(self.im1_psf, ((0, pShape2[0]-pShape1[0]), (0, 0)),
+                                  mode='constant', constant_values=0.)
+        elif (pShape2[0] < pShape1[0]):
+            self.im2_psf = np.pad(self.im2_psf, ((0, pShape1[0]-pShape2[0]), (0, 0)),
+                                  mode='constant', constant_values=0.)
+        if (pShape1[1] < pShape2[1]):
+            self.im1_psf = np.pad(self.im1_psf, ((0, 0), (0, pShape2[1]-pShape1[1])),
+                                  mode='constant', constant_values=0.)
+        elif (pShape2[1] < pShape1[1]):
+            self.im2_psf = np.pad(self.im2_psf, ((0, 0), (0, pShape1[1]-pShape2[1])),
+                                  mode='constant', constant_values=0.)
 
         self.sig1 = np.sqrt(self._computeVarianceMean(self.template)) if sig1 is None else sig1
         self.sig2 = np.sqrt(self._computeVarianceMean(self.science)) if sig2 is None else sig2
@@ -281,10 +291,11 @@ class ZogyTask(pipeBase.Task):
         psf : 2D numpy.array
             The padded copy of the input `psf`.
         """
-        new = np.zeros(size)
+        newArr = np.zeros(size)
         offset = [size[0]//2 - psf.shape[0]//2 - 1, size[1]//2 - psf.shape[1]//2 - 1]
-        new[offset[0]:(psf.shape[0] + offset[0]), offset[1]:(psf.shape[1] + offset[1])] = psf
-        return new
+        tmp = newArr[offset[0]:(psf.shape[0] + offset[0]), offset[1]:(psf.shape[1] + offset[1])]
+        tmp[:, :] = psf
+        return newArr
 
     def computePrereqs(self, psf1=None, psf2=None, padSize=0):
         """Compute standard ZOGY quantities used by (nearly) all methods.
@@ -316,8 +327,8 @@ class ZogyTask(pipeBase.Task):
         padSize = self.padSize if padSize is None else padSize
         Pr, Pn = psf1, psf2
         if padSize > 0:
-            Pr = ZogyTask._padPsfToSize(psf1, (psf1.shape[0]+padSize, psf1.shape[0]+padSize))
-            Pn = ZogyTask._padPsfToSize(psf2, (psf2.shape[0]+padSize, psf2.shape[0]+padSize))
+            Pr = ZogyTask._padPsfToSize(psf1, (psf1.shape[0]+padSize, psf1.shape[1]+padSize))
+            Pn = ZogyTask._padPsfToSize(psf2, (psf2.shape[0]+padSize, psf2.shape[1]+padSize))
 
         sigR, sigN = self.sig1, self.sig2
         Pr_hat = np.fft.fft2(Pr)
@@ -430,7 +441,7 @@ class ZogyTask(pipeBase.Task):
         - We optionally re-center the kernel if necessary and return the possibly
           re-centered kernel
         """
-        kernelImg = afwImage.ImageD(kernel.shape[0], kernel.shape[1])
+        kernelImg = afwImage.ImageD(kernel.shape[1], kernel.shape[0])
         kernelImg.getArray()[:, :] = kernel
         kern = afwMath.FixedKernel(kernelImg)
         if recenterKernel:
@@ -506,10 +517,13 @@ class ZogyTask(pipeBase.Task):
     def _setNewPsf(self, exposure, psfArr):
         """Utility method to set an exposure's PSF when provided as a 2-d numpy.array
         """
-        psfI = afwImage.ImageD(psfArr.shape[0], psfArr.shape[1])
+        bbox = exposure.getBBox()
+        center = ((bbox.getBeginX() + bbox.getEndX()) // 2., (bbox.getBeginY() + bbox.getEndY()) // 2.)
+        center = afwGeom.Point2D(center[0], center[1])
+        psfI = afwImage.ImageD(psfArr.shape[1], psfArr.shape[0])
         psfI.getArray()[:, :] = psfArr
         psfK = afwMath.FixedKernel(psfI)
-        psfNew = measAlg.KernelPsf(psfK)
+        psfNew = measAlg.KernelPsf(psfK, center)
         exposure.setPsf(psfNew)
         return exposure
 
@@ -526,15 +540,21 @@ class ZogyTask(pipeBase.Task):
            Override config `inImageSpace` parameter
         padSize : int
            Override config `padSize` parameter
+        returnMatchedTemplate : bool
+           Include the PSF-matched template in the results Struct
         **kwargs : dict
             additional keyword arguments to be passed to
             `computeDiffimFourierSpace` or `computeDiffimImageSpace`.
 
         Returns
         -------
-        D : lsst.afw.Exposure
-           the proper image difference, including correct variance,
-           masks, and PSF
+        An lsst.pipe.base.Struct containing:
+           - D : lsst.afw.Exposure
+               the proper image difference, including correct variance,
+               masks, and PSF
+           - R : lsst.afw.Exposure
+               If `returnMatchedTemplate` is True, the PSF-matched template 
+               exposure
         """
         R = None
         inImageSpace = self.config.inImageSpace if inImageSpace is None else inImageSpace
@@ -890,9 +910,9 @@ class ZogyMapperSubtask(ZogyTask, ImageMapperSubtask):
         def _makePsfSquare(psf):
             # Sometimes CoaddPsf does this. Make it square.
             if psf.shape[0] < psf.shape[1]:
-                psf = ZogyTask._padPsfToSize(psf, (psf.shape[1], psf.shape[1]))
+                psf = np.pad(psf, ((0, psf.shape[1]-psf.shape[0]), (0, 0)), mode='constant', constant_values=0.)
             elif psf.shape[0] > psf.shape[1]:
-                psf = ZogyTask._padPsfToSize(psf, (psf.shape[0], psf.shape[0]))
+                psf = np.pad(psf, ((0, 0), (0, psf.shape[0]-psf.shape[1])), mode='constant', constant_values=0.)
             return psf
 
         psf2 = subExp2.getPsf().computeKernelImage(center).getArray()
@@ -942,6 +962,10 @@ class ZogyMapperSubtask(ZogyTask, ImageMapperSubtask):
 
 
 class ZogyMapReduceConfig(ImageMapReduceConfig):
+    """Config to be passed to ImageMapReduceTask
+
+    This config targets the imageMapper to use the ZogyMapperSubtask.
+    """
     mapperSubtask = pexConfig.ConfigurableField(
         doc='Zogy subtask to run on each sub-image',
         target=ZogyMapperSubtask
@@ -949,6 +973,8 @@ class ZogyMapReduceConfig(ImageMapReduceConfig):
 
 
 class ZogyImagePsfMatchConfig(ImagePsfMatchConfig):
+    """Config for the ZogyImagePsfMatchTask"""
+
     zogyConfig = pexConfig.ConfigField(
         dtype=ZogyConfig,
         doc='ZogyTask config to use when running on complete exposure (non spatially-varying)',
@@ -967,17 +993,16 @@ class ZogyImagePsfMatchConfig(ImagePsfMatchConfig):
 
 
 class ZogyImagePsfMatchTask(ImagePsfMatchTask):
+    """Task to perform Zogy PSF matching and image subtraction.
+
+    This class inherits from ImagePsfMatchTask to contain the _warper
+    subtask and related methods.
+    """
+
     ConfigClass = ZogyImagePsfMatchConfig
 
     def __init__(self, *args, **kwargs):
         ImagePsfMatchTask.__init__(self, *args, **kwargs)
-
-    def setDefaults(self):
-        config = self.config.zogyMapReduceConfig
-        config.gridStepX = config.gridStepY = 19
-        config.cellSizeX = config.cellSizeY = 20
-        config.borderSizeX = config.borderSizeY = 6
-        config.reducerSubtask.reduceOperation = 'average'
 
     def _computeImageMean(self, exposure):
         """Compute the sigma-clipped mean of the pixels image of `exposure`.
@@ -986,7 +1011,7 @@ class ZogyImagePsfMatchTask(ImagePsfMatchTask):
         statsControl.setNumSigmaClip(3.)
         statsControl.setNumIter(3)
         ignoreMaskPlanes = ("INTRP", "EDGE", "DETECTED", "SAT", "CR", "BAD", "NO_DATA", "DETECTED_NEGATIVE")
-        statsControl.setAndMask(afwImage.MaskU.getPlaneBitMask(ignoreMaskPlanes))
+        statsControl.setAndMask(afwImage.Mask.getPlaneBitMask(ignoreMaskPlanes))
         statObj = afwMath.makeStatistics(exposure.getMaskedImage().getImage(),
                                          exposure.getMaskedImage().getMask(),
                                          afwMath.MEANCLIP|afwMath.MEDIAN, statsControl)
@@ -997,6 +1022,38 @@ class ZogyImagePsfMatchTask(ImagePsfMatchTask):
     def subtractExposures(self, templateExposure, scienceExposure,
                           doWarping=True, spatiallyVarying=True, inImageSpace=False,
                           doPreConvolve=False):
+        """Register, PSF-match, and subtract two Exposures using the ZOGY algorithm.
+
+        Do the following, in order:
+        - Warp templateExposure to match scienceExposure, if their WCSs do not already match
+        - Compute subtracted exposure ZOGY image subtraction algorithm on the two exposures
+
+        Parameters
+        ----------
+        templateExposure : lsst.afw.image.Exposure
+            exposure to PSF-match to scienceExposure. The exposure's mean value is subtracted
+            in-place.
+        @param scienceExposure : lsst.afw.image.Exposure
+            reference Exposure. The exposure's mean value is subtracted in-place.
+        doWarping : bool
+            what to do if templateExposure's and scienceExposure's WCSs do not match:
+            - if True then warp templateExposure to match scienceExposure
+            - if False then raise an Exception
+        spatiallyVarying : bool
+            If True, perform the operation over a grid of patches across the two exposures
+        inImageSpace : bool
+            If True, perform the Zogy convolutions in image space rather than in frequency space.
+        doPreConvolve : bool
+            ***Currently not implemented.*** If True assume we are to compute the match filter-convolved
+            exposure which can be thresholded for detection. In the case of Zogy this would mean
+            we compute the Scorr image.
+
+        Returns
+        -------
+        A `lsst.pipe.base.Struct` containing these fields:
+        - subtractedExposure: subtracted Exposure
+        - warpedExposure: templateExposure after warping to match scienceExposure (if doWarping true)
+        """
 
         mn1 = self._computeImageMean(templateExposure)
         mn2 = self._computeImageMean(scienceExposure)
@@ -1022,16 +1079,14 @@ class ZogyImagePsfMatchTask(ImagePsfMatchTask):
                                                              destBBox=scienceExposure.getBBox())
 
                 templateExposure.setPsf(psfWarped)
-                templateExposure.writeFits('WARPEDTEMPLATE_ZOGY.fits')
             else:
                 self.log.error("ERROR: Input images not registered")
                 raise RuntimeError("Input images not registered")
 
         def gm(exp):
             return exp.getMaskedImage().getMask()
+
         def ga(exp):
-            return exp.getMaskedImage().getImage().getArray()
-        def gv(exp):
             return exp.getMaskedImage().getImage().getArray()
 
         if spatiallyVarying:
@@ -1040,10 +1095,11 @@ class ZogyImagePsfMatchTask(ImagePsfMatchTask):
             results = task.run(scienceExposure, template=templateExposure, inImageSpace=inImageSpace,
                                doScorr=doPreConvolve, forceEvenSized=True)
             results.D = results.exposure
-            # The CoaddPsf apparently cannot be used for detection as it doesn't have a
-            #  getImage() or computeShape() method (which uses getAveragePosition(), which apparently
-            #  is not implemented correctly.
-            # Need to get it to return the matchedExposure (convolved template) too, for dipole fitting.
+            # The CoaddPsf, when used for detection does not utilize its spatially-varying
+            #   properties; it simply computes the PSF at its getAveragePosition().
+            # Here, we need to get it to return the matchedExposure (convolved template)
+            #   too, for dipole fitting; but the imageMapReduce task might need to be engineered
+            #   for this purpose.
         else:
             config = self.config.zogyConfig
             task = ZogyTask(scienceExposure=scienceExposure, templateExposure=templateExposure,
@@ -1057,23 +1113,22 @@ class ZogyImagePsfMatchTask(ImagePsfMatchTask):
 
         # Make sure masks of input images are propagated to diffim
         mask = results.D.getMaskedImage().getMask()
-        mask |= gm(scienceExposure)
-        mask |= gm(templateExposure)
-        gm(results.D)[:, :] = mask
+        mask |= scienceExposure.getMaskedImage().getMask()
+        mask |= templateExposure.getMaskedImage().getMask()
+        results.D.getMaskedImage().getMask()[:, :] = mask
         #badBits = mask.getPlaneBitMask(['UNMASKEDNAN', 'NO_DATA', 'BAD', 'EDGE', 'SUSPECT', 'CR', 'SAT'])
         mask.addMaskPlane('UNMASKEDNAN')
         badBitsNan = mask.getPlaneBitMask(['UNMASKEDNAN'])
-        gm(results.D).getArray()[np.isnan(ga(results.D))] |= badBitsNan
-        gm(results.D).getArray()[np.isnan(ga(scienceExposure))] |= badBitsNan
-        gm(results.D).getArray()[np.isnan(ga(templateExposure))] |= badBitsNan
+        resultsArr = results.D.getMaskedImage().getMask().getArray()
+        resultsArr[np.isnan(resultsArr)] |= badBitsNan
+        resultsArr[np.isnan(scienceExposure.getMaskedImage().getImage().getArray())] |= badBitsNan
+        resultsArr[np.isnan(templateExposure.getMaskedImage().getImage().getArray())] |= badBitsNan
 
-        #results = pipeBase.Struct(exposure=D)
         results.subtractedExposure = results.D
-        #results.matchedExposure = results.R
         results.warpedExposure = templateExposure
         return results
 
     def subtractMaskedImages(self, templateExposure, scienceExposure,
                              doWarping=True, spatiallyVarying=True, inImageSpace=False,
                              doPreConvolve=False):
-        pass  # not implemented
+        raise NotImplementedError
